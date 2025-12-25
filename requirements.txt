@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+ib_insync
+pydantic
+sv-ttk
