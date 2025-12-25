@@ -1,12 +1,11 @@
-# backend/worker.py
-import threading
-import asyncio
-from ib_insync import IB, Stock, LimitOrder, Order
+from ib_insync import IB, Stock, Option, Order
+import asyncio, threading
 
 class IBWorker:
     def __init__(self):
         self.ib = IB()
         self.connected = False
+        self.loop = None
 
     def _connect_thread(self, host, port, clientId):
         loop = asyncio.new_event_loop()
@@ -21,69 +20,79 @@ class IBWorker:
             print("API connection failed:", e)
 
     def start(self, host='127.0.0.1', port=7496, clientId=1):
-        """Запуск подключения в отдельном потоке"""
         threading.Thread(
             target=self._connect_thread, args=(host, port, clientId), daemon=True
         ).start()
 
-    # Пример отправки лимитного ордера
-    def place_limit_order(self, symbol: str, qty: int, price: float, action: str = "BUY"):
-        if not self.connected:
-            print("Not connected to IBKR yet")
-            return None
+    def build_contract(self, symbol, is_option=False, expiry=None, strike=None, right="C"):
+        if is_option:
+            contract = Option(symbol, expiry, strike, right, 'SMART')
+        else:
+            contract = Stock(symbol, 'SMART', 'USD')
+        return contract
 
-        contract = Stock(symbol, 'SMART', 'USD')
-        order = LimitOrder(action, qty, price)
-        trade = self.ib.placeOrder(contract, order)
-        return trade
-
-    def place_trailing_order_threadsafe(self, symbol: str, qty: int, limit_price: float, trail_amount: float,
-                                        action: str = "BUY"):
-        """Запуск трейлинг ордера в отдельном потоке, чтобы избежать проблем с event loop"""
-        result = {}
-
-        def target():
-            result['trade'] = self.place_trailing_order(symbol, qty, limit_price, trail_amount, action)
-
-        thread = threading.Thread(target=target)
-        thread.start()
-        thread.join()
-        return result.get('trade')
-
-    # Добавляем трейлинг-ордер
-    from ib_insync import Stock, Order
-    import asyncio
-
-    def place_trailing_order(
-            self,
-            symbol: str,
-            qty: int,
-            limit_price: float,
-            trail_amount: float,
-            action: str = "BUY"
-    ):
+    def place_order(self, symbol, qty, limit_price=None, trail_amount=None, order_type="Limit",
+                    is_option=False, expiry=None, strike=None, right="C", action="BUY"):
         if not self.connected or not self.loop:
             print("Not connected to IBKR yet")
             return None
 
-        contract = Stock(symbol, 'SMART', 'USD')
+        contract = self.build_contract(symbol, is_option, expiry, strike, right)
+        asyncio.run_coroutine_threadsafe(self.ib.qualifyContractsAsync(contract), self.loop).result()
 
-        order = Order(
-            action=action,
-            orderType="TRAIL",
-            totalQuantity=qty,
-            lmtPrice=limit_price,
-            auxPrice=trail_amount
-        )
+        req_id = self.ib.client.getReqId()
 
-        async def place():
-            return self.ib.placeOrder(contract, order)
+        # TRAILING ORDER
+        if order_type.lower() == "trail":
+            parent_order = Order(
+                orderId=req_id,
+                action=action,
+                orderType="LMT",
+                totalQuantity=qty,
+                lmtPrice=limit_price,
+                tif="DAY",
+                transmit=False
+            )
 
-        future = asyncio.run_coroutine_threadsafe(place(), self.loop)
-        return future.result()
+            trail_order = Order(
+                action="SELL" if action=="BUY" else "BUY",  # всегда противоположное для трейла
+                orderType="TRAIL",
+                auxPrice=trail_amount,
+                totalQuantity=qty,
+                parentId=req_id,
+                transmit=True
+            )
 
-# Пример использования:
-# worker = IBWorker()
-# worker.start()
-# worker.place_limit_order('NVDA', 10, 500)
-# worker.place_trailing_order('NVDA', 10, 500, 5)
+            async def place_orders():
+                trade_parent = self.ib.placeOrder(contract, parent_order)
+                await asyncio.sleep(0.2)
+                trade_trail = self.ib.placeOrder(contract, trail_order)
+                return trade_parent, trade_trail
+
+            future = asyncio.run_coroutine_threadsafe(place_orders(), self.loop)
+            return future.result()
+
+        # OTHER ORDERS: Limit / Market / Stop
+        else:
+            ot = order_type.upper()
+            if ot == "LIMIT":
+                ot = "LMT"
+            elif ot == "MARKET":
+                ot = "MKT"
+            elif ot == "STOP":
+                ot = "STP"
+
+            order = Order(
+                orderId=req_id,
+                action=action,
+                orderType=ot,
+                totalQuantity=qty,
+                lmtPrice=limit_price if ot=="LMT" else None,
+                transmit=True
+            )
+
+            async def place():
+                return self.ib.placeOrder(contract, order)
+
+            future = asyncio.run_coroutine_threadsafe(place(), self.loop)
+            return future.result()
