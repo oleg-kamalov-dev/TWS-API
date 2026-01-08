@@ -14,6 +14,8 @@ function App() {
   const [right, setRight] = useState("C");
 
   const [response, setResponse] = useState(null);
+  const [atmInfo, setAtmInfo] = useState(null); // <- новый стейт для ATM
+  const [netLiquidation, setNetLiquidation] = useState(null); // <- новый стейт для ликвидности
 
   const tickers = ["NVDA", "NVDL", "TSLA", "TSLL", "SPX"];
   const orderTypes = ["Limit", "Market", "Stop", "Trail"];
@@ -75,6 +77,44 @@ function App() {
     })
       .then(res => res.json())
       .then(data => setResponse(data))
+      .catch(console.error);
+  };
+
+  // ------------------- ФУНКЦИЯ получение цены опциона -------------------
+  const getAtmOption = () => {
+    fetch("http://localhost:8000/get_atm_option", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol,
+        right,
+        expiry
+      })
+    })
+      .then(res => res.json())
+      .then(data => setAtmInfo(data))
+      .catch(console.error);
+  };
+
+  // ------------------- НОВАЯ ФУНКЦИЯ для ликвидности -------------------
+  const getNetLiquidation = () => {
+    fetch("http://localhost:8000/get_net_liquidation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    })
+      .then(res => res.json())
+      .then(data => {
+        console.log("Net Liquidation:", data.netLiquidation);
+
+        // обновляем стейт netLiquidation
+        setNetLiquidation(data.netLiquidation);
+
+        // опционально добавляем в общий лог response
+        setResponse(prev => ({
+          ...prev,
+          netLiquidation: data.netLiquidation
+        }));
+      })
       .catch(console.error);
   };
 
@@ -189,14 +229,26 @@ function App() {
           <button className="btn green" onClick={buyTrailing}>Buy + Trailing</button>
           <button className="btn green" onClick={buyOrder}>Buy</button>
           <button className="btn red" onClick={sellOrder}>Sell</button>
+          <button className="btn blue" onClick={getAtmOption}>Get ATM Option</button>
+          <button className="btn blue" onClick={getNetLiquidation}>Get Liquid</button>
         </div>
+      </div>
+
+      {/* ATM INFO */}
+      <div className="panel">
+        <div className="panel-title">ATM Option Info</div>
+        <pre className="log">
+          {atmInfo ? JSON.stringify(atmInfo, null, 2) : "No ATM data"}
+        </pre>
       </div>
 
       {/* LOG */}
       <div className="panel">
         <div className="panel-title">Log</div>
         <pre className="log">
-          {response ? JSON.stringify(response, null, 2) : "No data"}
+          {response || netLiquidation !== null
+            ? JSON.stringify({ ...response, netLiquidation }, null, 2)
+            : "No data"}
         </pre>
       </div>
     </div>

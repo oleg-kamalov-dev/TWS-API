@@ -11,17 +11,29 @@ ib.connect('127.0.0.1', 7496, clientId=1)
 
 # ================== HELPERS ==================
 def build_contract():
+    """
+    Создает контракт на основе введённого тикера и параметров.
+    Поддерживает акции и индексы.
+    """
     symbol = entry_symbol.get().upper().strip()
+
     if option_var.get():
         right = "C" if right_var.get() == "Call" else "P"
         return Option(
-            symbol,
-            expiry_entry.get(),
-            float(strike_entry.get()),
-            right,
+            symbol=symbol,
+            lastTradeDateOrContractMonth=expiry_entry.get().strip(),
+            strike=float(strike_entry.get()),
+            right=right,
             exchange='SMART',
-            currency='USD'
+            currency='USD',
+            multiplier='100'
         )
+
+    # Индексы
+    if symbol in ['SPX', 'NDX', 'RUT']:
+        return Index(symbol, 'CBOE', 'USD')
+
+    # Акции
     return Stock(symbol, 'SMART', 'USD')
 
 
@@ -158,6 +170,117 @@ def update_orders():
 
     root.after(2000, update_orders)  # повторяем каждые 2 секунды
 
+def get_atm_option():
+    """
+    Находит ATM опцион для заданного underlying и даты из поля ввода.
+    Поддерживает Regular и Weekly опционы.
+    """
+    symbol = entry_symbol.get().upper().strip()
+    right = "C" if right_var.get() == "Call" else "P"
+
+    info_text.delete(1.0, tk.END)
+
+    if not symbol:
+        info_text.insert(tk.END, "❌ Ticker не задан\n")
+        return
+
+    # === UNDERLYING ===
+    if symbol in ['SPX', 'NDX', 'RUT']:
+        stk = Index(symbol, 'CBOE', 'USD')
+    else:
+        stk = Stock(symbol, 'SMART', 'USD')
+
+    ib.qualifyContracts(stk)
+
+    ul_ticker = ib.reqTickers(stk)[0]
+    for _ in range(10):
+        ul_price = ul_ticker.marketPrice()
+        if ul_price is not None:
+            break
+        ib.sleep(0.2)
+    else:
+        info_text.insert(tk.END, "❌ Не удалось получить цену underlying\n")
+        return
+
+    # === OPTION CHAINS ===
+    chains = ib.reqSecDefOptParams(stk.symbol, '', stk.secType, stk.conId)
+    if not chains:
+        info_text.insert(tk.END, "❌ Option chain не найден\n")
+        return
+
+    expiry_input = expiry_entry.get().strip()
+    chain = None
+
+    # ищем цепочку, где есть введённая дата
+    for c in chains:
+        valid_expiries = []
+        for d in c.expirations:
+            if isinstance(d, str):
+                valid_expiries.append(d.strip())
+            else:
+                valid_expiries.append(d.strftime('%Y%m%d'))
+        if expiry_input in valid_expiries:
+            chain = c
+            break
+
+    if not chain:
+        info_text.insert(
+            tk.END,
+            f"❌ Expiration {expiry_input} отсутствует в любой цепочке\n"
+            f"Доступные цепочки и даты:\n"
+        )
+        for c in chains:
+            dates = []
+            for d in c.expirations:
+                if isinstance(d, str):
+                    dates.append(d.strip())
+                else:
+                    dates.append(d.strftime('%Y%m%d'))
+            info_text.insert(tk.END, f"{c.tradingClass}: {', '.join(dates)}\n")
+        return
+
+    # === ATM STRIKE ===
+    atm_strike = min(chain.strikes, key=lambda s: abs(s - ul_price))
+    strike_entry.delete(0, tk.END)
+    strike_entry.insert(0, str(atm_strike))
+
+    expiry_entry.delete(0, tk.END)
+    expiry_entry.insert(0, expiry_input)
+
+    # === OPTION CONTRACT ===
+    opt = Option(
+        symbol=symbol,
+        lastTradeDateOrContractMonth=expiry_input,
+        strike=atm_strike,
+        right=right,
+        exchange='SMART',
+        currency='USD',
+        multiplier='100'
+    )
+    ib.qualifyContracts(opt)
+
+    opt_ticker = ib.reqTickers(opt)[0]
+    for _ in range(10):
+        bid = opt_ticker.bid
+        ask = opt_ticker.ask
+        if bid is not None and ask is not None:
+            break
+        ib.sleep(0.2)
+    else:
+        info_text.insert(tk.END, "❌ Не удалось получить цены опциона\n")
+        return
+
+    mid = round((bid + ask) / 2, 2)
+
+    # === OUTPUT ===
+    info_text.insert(
+        tk.END,
+        f"ATM {symbol} {expiry_input} {right} {atm_strike}\n"
+        f"Underlying: {round(ul_price, 2)}\n"
+        f"Bid: {bid}  Ask: {ask}  Mid: {mid}\n"
+        f"TradingClass: {chain.tradingClass}\n"
+    )
+
 # ================== GUI ==================
 root = tk.Tk()
 root.title("TWS API (Dark)")
@@ -228,6 +351,12 @@ ttk.Button(actions, text="Get Price", command=lambda: get_price(build_contract()
 ttk.Button(actions, text="Buy", command=buy_stock).pack(side="left", padx=5)
 ttk.Button(actions, text="Buy + Bracket", command=buy_bracket).pack(side="left", padx=5)
 ttk.Button(actions, text="Buy + Trailing", command=buy_trailing).pack(side="left", padx=5)
+ttk.Button(
+    actions,
+    text="ATM",
+    command=get_atm_option
+).pack(side="left", padx=5)
+
 
 # ===== ORDERS =====
 orders_frame = ttk.LabelFrame(root, text="Active Orders", padding=10)
@@ -241,6 +370,13 @@ orders_text.grid(row=0, column=0, sticky="nsew")
 
 price_label = ttk.Label(root, font=("Segoe UI", 12))
 price_label.grid(row=4, column=0, sticky="w", padx=10)
+
+# ===== INFO =====
+info_frame = ttk.LabelFrame(root, text="ATM / Market Info", padding=10)
+info_frame.grid(row=5, column=0, sticky="ew", padx=10, pady=5)
+
+info_text = tk.Text(info_frame, height=4, bg="#1e1e1e", fg="lightgreen")
+info_text.pack(fill="both", expand=True)
 
 update_orders()
 root.mainloop()

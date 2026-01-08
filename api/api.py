@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from worker.worker import IBWorker
 import threading
-
+from fastapi.concurrency import run_in_threadpool
 app = FastAPI()
 
 app.add_middleware(
@@ -29,6 +29,15 @@ class OrderRequest(BaseModel):
     strike: Optional[float] = None
     right: Optional[str] = None
 
+class AtmRequest(BaseModel):
+    symbol: str
+    right: str = "C"
+    expiry: Optional[str] = None
+
+@app.post("/get_atm_option")
+def get_atm_option(data: AtmRequest):
+    result = worker.get_atm_option(data.symbol, data.right, data.expiry)
+    return result
 
 @app.post("/buy_order")
 def buy_order(data: OrderRequest):
@@ -95,4 +104,12 @@ def buy_trailing(data: OrderRequest):
         "status": "success",
         "parentOrderId": parent_trade.order.orderId,
         "trailOrderId": trail_trade.order.orderId
+    }
+
+@app.post("/get_net_liquidation")
+def get_net_liquidation():
+    value = worker.get_net_liquidation()
+    print("Net Liquidation:", value)
+    return {
+        "netLiquidation": value
     }
